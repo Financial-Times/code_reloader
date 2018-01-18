@@ -69,8 +69,6 @@ defmodule CodeReloader.Server do
   end
 
   def handle_call({:reload!, endpoint} = msg, from, {_, compilers} = state) do
-    IO.inspect {:reload!, msg, state}
-
     backup = load_backup(endpoint)
     froms  = all_waiting([from], endpoint)
 
