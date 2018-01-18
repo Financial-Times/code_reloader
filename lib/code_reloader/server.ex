@@ -1,12 +1,38 @@
 defmodule CodeReloader.Server do
-  @moduledoc false
+  @moduledoc """
+  Recompiles modified files in the current mix project by invoking configured reloadable compilers.
+
+  Specify the compilers that should be run for reloading when starting the server, e.g.:
+
+  ```
+  children = [{CodeReloader.Server, [:elixir, :erlang]}]
+  Supervisor.start_link(children, [strategy: :one_for_one])
+  ```
+
+  Code can then be reloaded by calling:
+  
+  ```
+  CodeReloader.Server.reload!(mod)
+  ```
+
+  where `mod` will normally be a `Plug.Router` module containing the `CodeReloader.Plug`
+  used to instigate the code reload on every web-server call (it could potentially 
+  be any another module being used to kick-off the reload).
+
+  The `mod` argument is used for two purposes:
+  * To avoid race conditions from multiple calls: all code reloads from the same
+    module are funneled through a sequential call operation.
+  * To back-up the module's `.beam` file so if compilation of the module itself fails, 
+    it can be restored to working order, otherwise code reload through that
+    module would no-longer be available.
+"""
   use GenServer
 
   require Logger
   alias CodeReloader.Proxy
 
-  def start_link(_) do
-    GenServer.start_link(__MODULE__, false, name: __MODULE__)
+  def start_link(reloadable_compilers) do
+    GenServer.start_link(__MODULE__, reloadable_compilers, name: __MODULE__)
   end
 
   def check_symlinks do
@@ -19,14 +45,14 @@ defmodule CodeReloader.Server do
 
   ## Callbacks
 
-  def init(false) do
-    {:ok, false}
+  def init(reloadable_compilers) do
+    {:ok, {false, reloadable_compilers}}
   end
 
-  def handle_call(:check_symlinks, _from, checked?) do
+  def handle_call(:check_symlinks, _from, {checked?, reloadable_compilers}) do
     if not checked? and Code.ensure_loaded?(Mix.Project) do
       build_path = Mix.Project.build_path()
-      symlink = Path.join(Path.dirname(build_path), "__phoenix__")
+      symlink = Path.join(Path.dirname(build_path), "#{__MODULE__}")
 
       case File.ln_s(build_path, symlink) do
         :ok ->
@@ -34,16 +60,15 @@ defmodule CodeReloader.Server do
         {:error, :eexist} ->
           File.rm(symlink)
         {:error, _} ->
-          Logger.warn "Phoenix is unable to create symlinks. Phoenix' code reloader will run " <>
+          Logger.warn "App is unable to create symlinks. CodeReloader will run " <>
                       "considerably faster if symlinks are allowed." <> os_symlink(:os.type)
       end
     end
 
-    {:reply, :ok, true}
+    {:reply, :ok, {true, reloadable_compilers}}
   end
 
-  def handle_call({:reload!, endpoint}, from, state) do
-    compilers = endpoint.config(:reloadable_compilers)
+  def handle_call({:reload!, endpoint} = msg, from, {_, compilers} = state) do
     backup = load_backup(endpoint)
     froms  = all_waiting([from], endpoint)
 
@@ -63,7 +88,7 @@ defmodule CodeReloader.Server do
     reply =
       case res do
         :ok ->
-          :ok
+          {:ok, out}
         :error ->
           write_backup(backup)
           {:error, out}
