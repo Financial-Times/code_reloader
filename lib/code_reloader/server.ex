@@ -1,36 +1,36 @@
 defmodule CodeReloader.Server do
   @moduledoc """
-  Recompiles modified files in the current mix project by invoking configured reloadable compilers.
+    Recompiles modified files in the current mix project by invoking configured reloadable compilers.
 
-  Specify the compilers that should be run for reloading when starting the server, e.g.:
+    Specify the compilers that should be run for reloading when starting the server, e.g.:
 
-  ```
-  children = [{CodeReloader.Server, [:elixir, :erlang]}]
-  Supervisor.start_link(children, [strategy: :one_for_one])
-  ```
+    ```
+    children = [{CodeReloader.Server, [:elixir, :erlang]}]
+    Supervisor.start_link(children, [strategy: :one_for_one])
+    ```
 
-  Code can then be reloaded by calling:
-  
-  ```
-  CodeReloader.Server.reload!(mod)
-  ```
+    Code can then be reloaded by calling:
+    
+    ```
+    CodeReloader.Server.reload!(mod)
+    ```
 
-  where `mod` will normally be a `Plug.Router` module containing the `CodeReloader.Plug`
-  used to instigate the code reload on every web-server call (it could potentially 
-  be any another module being used to kick-off the reload).
+    where `mod` will normally be a `Plug.Router` module containing the `CodeReloader.Plug`
+    used to instigate the code reload on every web-server call (it could potentially 
+    be any another module being used to kick-off the reload).
 
-  The `mod` argument is used for two purposes:
-  * To avoid race conditions from multiple calls: all code reloads from the same
-    module are funneled through a sequential call operation.
-  * To back-up the module's `.beam` file so if compilation of the module itself fails, 
-    it can be restored to working order, otherwise code reload through that
-    module would no-longer be available.
+    The `mod` argument is used for two purposes:
+    * To avoid race conditions from multiple calls: all code reloads from the same
+      module are funneled through a sequential call operation.
+    * To back-up the module's `.beam` file so if compilation of the module itself fails, 
+      it can be restored to working order, otherwise code reload through that
+      module would no-longer be available.
 
-  We also keep track of the last time we compiled the code, so that if the code changes
-  outside of the VM, e.g. a tool compiles the code, we notice that the manifest
-  is newer than what we compiled; we then `--force` a compilation to ensure that
-  modules are reloaded.
-"""
+    We also keep track of the last time we compiled the code, so that if the code changes
+    outside of the VM, e.g. a tool compiles the code, we notice that the manifest
+    is newer than what we compiled; we then `--force` a compilation to ensure that
+    modules are reloaded.
+  """
   use GenServer
 
   require Logger
@@ -62,11 +62,15 @@ defmodule CodeReloader.Server do
       case File.ln_s(build_path, symlink) do
         :ok ->
           File.rm(symlink)
+
         {:error, :eexist} ->
           File.rm(symlink)
+
         {:error, _} ->
-          Logger.warn "App is unable to create symlinks. CodeReloader will run " <>
-                      "considerably faster if symlinks are allowed." <> os_symlink(:os.type)
+          Logger.warn(
+            "App is unable to create symlinks. CodeReloader will run " <>
+              "considerably faster if symlinks are allowed." <> os_symlink(:os.type())
+          )
       end
     end
 
@@ -75,7 +79,7 @@ defmodule CodeReloader.Server do
 
   def handle_call({:reload!, endpoint}, from, {checked?, compilers, last_compile_time}) do
     backup = load_backup(endpoint)
-    froms  = all_waiting([from], endpoint)
+    froms = all_waiting([from], endpoint)
 
     {res, out} =
       proxy_io(fn ->
@@ -84,8 +88,9 @@ defmodule CodeReloader.Server do
         catch
           :exit, {:shutdown, 1} ->
             :error
+
           kind, reason ->
-            IO.puts Exception.format(kind, reason, System.stacktrace)
+            IO.puts(Exception.format(kind, reason, System.stacktrace()))
             :error
         end
       end)
@@ -94,6 +99,7 @@ defmodule CodeReloader.Server do
       case res do
         :ok ->
           {:ok, out}
+
         :error ->
           write_backup(backup)
           {:error, out}
@@ -109,20 +115,22 @@ defmodule CodeReloader.Server do
 
   defp os_symlink({:win32, _}),
     do: " On Windows, such can be done by starting the shell with \"Run as Administrator\"."
-  defp os_symlink(_),
-    do: ""
+
+  defp os_symlink(_), do: ""
 
   defp load_backup(mod) do
     mod
     |> :code.which()
     |> read_backup()
   end
+
   defp read_backup(path) when is_list(path) do
     case File.read(path) do
       {:ok, binary} -> {:ok, path, binary}
       _ -> :error
     end
   end
+
   defp read_backup(_path), do: :error
 
   defp write_backup({:ok, path, file}), do: File.write!(path, file)
@@ -140,54 +148,59 @@ defmodule CodeReloader.Server do
   # and just use loaded. apply/3 is used to prevent a compilation
   # warning.
   defp mix_compile({:module, Mix.Task}, compilers, last_compile_time) do
-    if Mix.Project.umbrella? do
+    if Mix.Project.umbrella?() do
       deps =
         if function_exported?(Mix.Dep.Umbrella, :cached, 0) do
           apply(Mix.Dep.Umbrella, :cached, [])
         else
-          Mix.Dep.Umbrella.loaded
+          Mix.Dep.Umbrella.loaded()
         end
-      Enum.each deps, fn dep ->
+
+      Enum.each(deps, fn dep ->
         Mix.Dep.in_dependency(dep, fn _ ->
           mix_compile_unless_stale_config(compilers, last_compile_time)
         end)
-      end
+      end)
     else
       mix_compile_unless_stale_config(compilers, last_compile_time)
       :ok
     end
   end
+
   defp mix_compile({:error, _reason}, _, _) do
     raise "the Code Reloader is enabled but Mix is not available. If you want to " <>
-          "use the Code Reloader in production or inside an escript, you must add " <>
-          ":mix to your applications list. Otherwise, you must disable code reloading " <>
-          "in such environments"
+            "use the Code Reloader in production or inside an escript, you must add " <>
+            ":mix to your applications list. Otherwise, you must disable code reloading " <>
+            "in such environments"
   end
 
   defp mix_compile_unless_stale_config(compilers, last_compile_time) do
-    manifests = Mix.Tasks.Compile.Elixir.manifests
-    configs   = Mix.Project.config_files
+    manifests = Mix.Tasks.Compile.Elixir.manifests()
+    configs = Mix.Project.config_files()
 
     # did the manifest change outside of us compiling the project?
-    manifests_last_updated = Enum.map(manifests, &(File.stat!(&1, time: :posix).mtime)) |> Enum.max()
+    manifests_last_updated =
+      Enum.map(manifests, &File.stat!(&1, time: :posix).mtime) |> Enum.max()
+
     force? = manifests_last_updated > last_compile_time
 
     case Mix.Utils.extract_stale(configs, manifests) do
       [] ->
         do_mix_compile(compilers, force?)
+
       files ->
         raise """
-        could not compile application: #{Mix.Project.config[:app]}.
+        could not compile application: #{Mix.Project.config()[:app]}.
 
         You must restart your server after changing the following config or lib files:
 
           * #{Enum.map_join(files, "\n  * ", &Path.relative_to_cwd/1)}
         """
-     end
-   end
+    end
+  end
 
   defp do_mix_compile(compilers, force?) do
-    all = Mix.Project.config[:compilers] || Mix.compilers
+    all = Mix.Project.config()[:compilers] || Mix.compilers()
 
     compilers =
       for compiler <- compilers, compiler in all do
@@ -199,7 +212,7 @@ defmodule CodeReloader.Server do
 
     # We call build_structure mostly for Windows so new
     # assets in priv are copied to the build directory.
-    Mix.Project.build_structure
+    Mix.Project.build_structure()
     res = Enum.map(compilers, &Mix.Task.run("compile.#{&1}", compile_opts))
 
     if :ok in res && consolidate_protocols?() do
@@ -211,11 +224,11 @@ defmodule CodeReloader.Server do
   end
 
   defp consolidate_protocols? do
-    Mix.Project.config[:consolidate_protocols]
+    Mix.Project.config()[:consolidate_protocols]
   end
 
   defp proxy_io(fun) do
-    original_gl = Process.group_leader
+    original_gl = Process.group_leader()
     {:ok, proxy_gl} = Proxy.start()
     Process.group_leader(self(), proxy_gl)
 
