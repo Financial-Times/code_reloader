@@ -58,8 +58,7 @@ defmodule CodeReloader.Plug do
   end
   defp do_call(conn, reloader, endpoint) do
     case reloader.(endpoint) do
-      {:ok, output} ->
-        Logger.info(fn -> output end)
+      {:ok, _output} ->
         conn
       {:error, output} ->
         conn

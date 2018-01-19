@@ -25,6 +25,11 @@ defmodule CodeReloader.Server do
   * To back-up the module's `.beam` file so if compilation of the module itself fails, 
     it can be restored to working order, otherwise code reload through that
     module would no-longer be available.
+
+  We also keep track of the last time we compiled the code, so that if the code changes
+  outside of the VM, e.g. a tool compiles the code, we notice that the manifest
+  is newer than what we compiled; we then `--force` a compilation to ensure that
+  modules are reloaded.
 """
   use GenServer
 
