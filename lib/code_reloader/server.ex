@@ -46,10 +46,10 @@ defmodule CodeReloader.Server do
   ## Callbacks
 
   def init(reloadable_compilers) do
-    {:ok, {false, reloadable_compilers}}
+    {:ok, {false, reloadable_compilers, System.os_time(:seconds)}}
   end
 
-  def handle_call(:check_symlinks, _from, {checked?, reloadable_compilers}) do
+  def handle_call(:check_symlinks, _from, {checked?, reloadable_compilers, last_compile_time}) do
     if not checked? and Code.ensure_loaded?(Mix.Project) do
       build_path = Mix.Project.build_path()
       symlink = Path.join(Path.dirname(build_path), "#{__MODULE__}")
@@ -65,17 +65,17 @@ defmodule CodeReloader.Server do
       end
     end
 
-    {:reply, :ok, {true, reloadable_compilers}}
+    {:reply, :ok, {true, reloadable_compilers, last_compile_time}}
   end
 
-  def handle_call({:reload!, endpoint} = msg, from, {_, compilers} = state) do
+  def handle_call({:reload!, endpoint}, from, {checked?, compilers, last_compile_time}) do
     backup = load_backup(endpoint)
     froms  = all_waiting([from], endpoint)
 
     {res, out} =
       proxy_io(fn ->
         try do
-          mix_compile(Code.ensure_loaded(Mix.Task), compilers)
+          mix_compile(Code.ensure_loaded(Mix.Task), compilers, last_compile_time)
         catch
           :exit, {:shutdown, 1} ->
             :error
@@ -95,7 +95,7 @@ defmodule CodeReloader.Server do
       end
 
     Enum.each(froms, &GenServer.reply(&1, reply))
-    {:noreply, state}
+    {:noreply, {checked?, compilers, System.os_time(:seconds)}}
   end
 
   def handle_info(_, state) do
@@ -134,7 +134,7 @@ defmodule CodeReloader.Server do
   # TODO: Remove the function_exported call after 1.3 support is removed
   # and just use loaded. apply/3 is used to prevent a compilation
   # warning.
-  defp mix_compile({:module, Mix.Task}, compilers) do
+  defp mix_compile({:module, Mix.Task}, compilers, last_compile_time) do
     if Mix.Project.umbrella? do
       deps =
         if function_exported?(Mix.Dep.Umbrella, :cached, 0) do
@@ -144,28 +144,32 @@ defmodule CodeReloader.Server do
         end
       Enum.each deps, fn dep ->
         Mix.Dep.in_dependency(dep, fn _ ->
-          mix_compile_unless_stale_config(compilers)
+          mix_compile_unless_stale_config(compilers, last_compile_time)
         end)
       end
     else
-      mix_compile_unless_stale_config(compilers)
+      mix_compile_unless_stale_config(compilers, last_compile_time)
       :ok
     end
   end
-  defp mix_compile({:error, _reason}, _) do
+  defp mix_compile({:error, _reason}, _, _) do
     raise "the Code Reloader is enabled but Mix is not available. If you want to " <>
           "use the Code Reloader in production or inside an escript, you must add " <>
           ":mix to your applications list. Otherwise, you must disable code reloading " <>
           "in such environments"
   end
 
-  defp mix_compile_unless_stale_config(compilers) do
+  defp mix_compile_unless_stale_config(compilers, last_compile_time) do
     manifests = Mix.Tasks.Compile.Elixir.manifests
     configs   = Mix.Project.config_files
 
+    # did the manifest change outside of us compiling the project?
+    manifests_last_updated = Enum.map(manifests, &(File.stat!(&1, time: :posix).mtime)) |> Enum.max()
+    force? = manifests_last_updated > last_compile_time
+
     case Mix.Utils.extract_stale(configs, manifests) do
       [] ->
-        mix_compile(compilers)
+        do_mix_compile(compilers, force?)
       files ->
         raise """
         could not compile application: #{Mix.Project.config[:app]}.
@@ -177,7 +181,7 @@ defmodule CodeReloader.Server do
      end
    end
 
-  defp mix_compile(compilers) do
+  defp do_mix_compile(compilers, force?) do
     all = Mix.Project.config[:compilers] || Mix.compilers
 
     compilers =
@@ -186,10 +190,12 @@ defmodule CodeReloader.Server do
         compiler
       end
 
+    compile_opts = if(force?, do: ["--force"], else: [])
+
     # We call build_structure mostly for Windows so new
     # assets in priv are copied to the build directory.
     Mix.Project.build_structure
-    res = Enum.map(compilers, &Mix.Task.run("compile.#{&1}", []))
+    res = Enum.map(compilers, &Mix.Task.run("compile.#{&1}", compile_opts))
 
     if :ok in res && consolidate_protocols?() do
       Mix.Task.reenable("compile.protocols")
