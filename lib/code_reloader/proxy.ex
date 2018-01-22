@@ -14,6 +14,10 @@ defmodule CodeReloader.Proxy do
 
   ## Callbacks
 
+  def init(args) do
+    {:ok, args}
+  end
+
   def handle_call(:stop, _from, output) do
     {:stop, :normal, output, output}
   end

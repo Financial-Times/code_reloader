@@ -16,20 +16,26 @@ defmodule CodeReloader.Server do
     ```
 
     where `mod` will normally be a `Plug.Router` module containing the `CodeReloader.Plug`
-    used to instigate the code reload on every web-server call (it could potentially 
+    used to instigate a code reload on every web-server call (it could potentially 
     be any another module being used to kick-off the reload).
 
     The `mod` argument is used for two purposes:
+
     * To avoid race conditions from multiple calls: all code reloads from the same
       module are funneled through a sequential call operation.
     * To back-up the module's `.beam` file so if compilation of the module itself fails, 
       it can be restored to working order, otherwise code reload through that
-      module would no-longer be available.
+      module would no-longer be available, which would kill an endpoint.
 
-    We also keep track of the last time we compiled the code, so that if the code changes
-    outside of the VM, e.g. a tool compiles the code, we notice that the manifest
-    is newer than what we compiled; we then `--force` a compilation to ensure that
-    modules are reloaded.
+    We also keep track of the last time that we compiled the code, so that if the code changes
+    outside of the VM, e.g. an external tool recompiles the code, we notice that the manifest
+    is newer than when we compiled, and explicitly reload all modified modules (see `:code.modified_modules/0`)
+    since compiling will potentially be a no-op.
+    
+    This code is based on that in the [Pheonix Project](https://github.com/phoenixframework/phoenix),
+    without the Phoenix dependencies, and modified to deal with the edge-case of projects recompiled 
+    outside of the `CodeReloader.Server` (the original only copes with modified source code).
+
   """
   use GenServer
 
@@ -182,11 +188,11 @@ defmodule CodeReloader.Server do
     manifests_last_updated =
       Enum.map(manifests, &File.stat!(&1, time: :posix).mtime) |> Enum.max()
 
-    force? = manifests_last_updated > last_compile_time
+    out_of_date? = manifests_last_updated > last_compile_time
 
     case Mix.Utils.extract_stale(configs, manifests) do
       [] ->
-        do_mix_compile(compilers, force?)
+        do_mix_compile(compilers, out_of_date?)
 
       files ->
         raise """
@@ -199,7 +205,7 @@ defmodule CodeReloader.Server do
     end
   end
 
-  defp do_mix_compile(compilers, force?) do
+  defp do_mix_compile(compilers, out_of_date?) do
     all = Mix.Project.config()[:compilers] || Mix.compilers()
 
     compilers =
@@ -208,23 +214,40 @@ defmodule CodeReloader.Server do
         compiler
       end
 
-    compile_opts = if(force?, do: ["--force"], else: [])
-
     # We call build_structure mostly for Windows so new
     # assets in priv are copied to the build directory.
     Mix.Project.build_structure()
-    res = Enum.map(compilers, &Mix.Task.run("compile.#{&1}", compile_opts))
+    res = Enum.map(compilers, &Mix.Task.run("compile.#{&1}", []))
 
     if :ok in res && consolidate_protocols?() do
       Mix.Task.reenable("compile.protocols")
       Mix.Task.run("compile.protocols", [])
     end
 
+    if(out_of_date?, do: reload_modules())
+
     res
   end
 
   defp consolidate_protocols? do
     Mix.Project.config()[:consolidate_protocols]
+  end
+
+  defp reload_modules() do
+    :code.modified_modules()
+    |> Enum.each(fn mod ->
+      IO.puts("Reloading #{inspect(mod)}\n")
+
+      case :code.soft_purge(mod) do
+        true ->
+          :code.load_file(mod)
+
+        false ->
+          Process.sleep(500)
+          :code.purge(mod)
+          :code.load_file(mod)
+      end
+    end)
   end
 
   defp proxy_io(fun) do
